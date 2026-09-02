@@ -336,7 +336,7 @@
                     <div class="slideshow-container" id="slideshowContainerImages"></div>
                 </div>
 
-                <!-- Area Pilih Berkas (Disembunyikan pada menu Jadwal) -->
+                <!-- Area Pilih Berkas -->
                 <div class="upload-area" id="uploadAreaContainer" onclick="triggerUpload()">
                     <button class="btn-upload" type="button">Pilih Berkas</button>
                     <input type="file" id="dynamicFileInput" class="file-input-hidden" multiple onchange="handleFiles(this)">
@@ -371,6 +371,33 @@
             Memuat Waktu...
         </div>
     </div>
+
+    <!-- Firebase SDK (Modular CDN) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getStorage, ref, uploadBytes, listAll, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+
+        // Konfigurasi Firebase Anda (Ganti dengan kredensial dari Firebase Console)
+        const firebaseConfig = {
+            apiKey: "API_KEY_ANDA",
+            authDomain: "project-id.firebaseapp.com",
+            projectId: "project-id",
+            storageBucket: "project-id.appspot.com",
+            messagingSenderId: "sender-id",
+            appId: "app-id"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const storage = getStorage(app);
+
+        // Ubah variabel global agar bisa diakses fungsi luar
+        window.fbStorage = storage;
+        window.fbRef = ref;
+        window.fbUploadBytes = uploadBytes;
+        window.fbListAll = listAll;
+        window.fbGetDownloadURL = getDownloadURL;
+        window.fbDeleteObject = deleteObject;
+    </script>
 
     <script>
         const monthNames = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
@@ -438,16 +465,6 @@
         let currentMenuId = ""; 
         let slideshowInterval = null;
 
-        let db;
-        const request = indexedDB.open("PuskesmasILP_MasterDB_V6", 1);
-        request.onupgradeneeded = function(event) {
-            db = event.target.result;
-            if (!db.objectStoreNames.contains("docs")) {
-                db.createObjectStore("docs", { keyPath: "id", autoIncrement: true });
-            }
-        };
-        request.onsuccess = function(event) { db = event.target.result; };
-
         function selectMenu(categoryCode, periodIdentifier, mainTitle, subTitle) {
             currentMenuId = categoryCode + "-" + periodIdentifier;
 
@@ -465,9 +482,9 @@
             if (categoryCode === 'jadwal') {
                 calArea.style.display = 'block';
                 renderFullYearCalendar();
-                uploadArea.style.display = 'none'; // Tombol Pilih Berkas disembunyikan untuk kalender 1 tahun
+                uploadArea.style.display = 'none'; 
                 slideshowArea.style.display = 'none';
-                fileListArea.style.display = 'none'; // Daftar file juga disembunyikan agar bersih khusus kalender
+                fileListArea.style.display = 'none'; 
             }
             else if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
                 calArea.style.display = 'none';
@@ -495,65 +512,96 @@
 
         function triggerUpload() { document.getElementById('dynamicFileInput').click(); }
 
-        function handleFiles(input) {
+        // FUNGSI UPLOAD KE FIREBASE STORAGE
+        async function handleFiles(input) {
             const files = input.files;
             if (files.length === 0 || currentMenuId === "") return;
-            if (!db) { alert("Database sedang dimuat, silakan coba lagi."); return; }
+            if (!window.fbStorage) { alert("Firebase belum terhubung sepenuhnya."); return; }
 
             let categoryCode = currentMenuId.split("-")[0];
+
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                const transaction = db.transaction(["docs"], "readwrite");
-                const store = transaction.objectStore("docs");
-                const fileData = {
-                    menuId: currentMenuId, fileName: file.name, fileType: file.type, fileSize: file.size, fileContent: file 
-                };
-                const addRequest = store.add(fileData);
-                addRequest.onsuccess = function(e) {
-                    fileData.id = e.target.result;
+                const storageRef = window.fbRef(window.fbStorage, `${currentMenuId}/${file.name}`);
+
+                try {
+                    // Unggah file ke Firebase Storage
+                    await window.fbUploadBytes(storageRef, file);
+                    // Ambil URL publik file tersebut
+                    const downloadURL = await window.fbGetDownloadURL(storageRef);
+
+                    const fileData = {
+                        name: file.name,
+                        url: downloadURL,
+                        size: file.size,
+                        type: file.type
+                    };
+
                     if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
                         loadFilesForCurrentMenu(categoryCode);
                     } else {
-                        renderFileItem(fileData); 
+                        renderFileItem(fileData);
                     }
-                };
+                } catch (error) {
+                    console.error("Gagal mengunggah file:", error);
+                    alert("Terjadi kesalahan saat mengunggah file ke Cloud.");
+                }
             }
             input.value = '';
         }
 
-        function loadFilesForCurrentMenu(categoryCode) {
-            if (!db) { setTimeout(() => loadFilesForCurrentMenu(categoryCode), 100); return; }
-            const transaction = db.transaction(["docs"], "readonly");
-            const store = transaction.objectStore("docs");
-            const request = store.getAll();
-            request.onsuccess = function(e) {
-                const allDocs = e.target.result;
-                let matchedDocs = allDocs.filter(data => data.menuId === currentMenuId);
-                if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
-                    let imageDocs = matchedDocs.filter(data => data.fileType.includes('image/') || data.fileName.match(/\.(jpg|jpeg|png|gif)$/i));
-                    renderSlideshowImages(imageDocs);
-                } else {
-                    matchedDocs.forEach(data => { renderFileItem(data); });
+        // FUNGSI LOAD FILE DARI FIREBASE STORAGE
+        async function loadFilesForCurrentMenu(categoryCode) {
+            if (!window.fbStorage) {
+                setTimeout(() => loadFilesForCurrentMenu(categoryCode), 200);
+                return;
+            }
+
+            const listRef = window.fbRef(window.fbStorage, `${currentMenuId}/`);
+
+            try {
+                const res = await window.fbListAll(listRef);
+                let imageDocs = [];
+
+                for (const itemRef of res.items) {
+                    const url = await window.fbGetDownloadURL(itemRef);
+                    const fileData = {
+                        name: itemRef.name,
+                        url: url,
+                        type: itemRef.name.match(/\.(jpg|jpeg|png|gif)$/i) ? 'image/' : 'document'
+                    };
+
+                    if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
+                        imageDocs.push(fileData);
+                    } else {
+                        renderFileItem(fileData);
+                    }
                 }
-            };
+
+                if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
+                    renderSlideshowImages(imageDocs);
+                }
+            } catch (error) {
+                console.error("Gagal memuat file dari Firebase:", error);
+            }
         }
 
         function renderFileItem(data) {
             const listContainer = document.getElementById('dynamicFileList');
             const li = document.createElement('li');
             li.className = 'file-item';
-            const fileURL = URL.createObjectURL(data.fileContent);
-            let fileSize = (data.fileSize / 1024).toFixed(1) + ' KB';
-            if (data.fileSize > 1024 * 1024) fileSize = (data.fileSize / (1024 * 1024)).toFixed(1) + ' MB';
+            
+            let fileSize = data.size ? (data.size / 1024).toFixed(1) + ' KB' : '';
+
             li.innerHTML = `
                 <div style="display:flex; align-items:center; gap:8px; max-width:60%;">
                     <span>📄</span>
-                    <a href="${fileURL}" target="_blank" title="Unduh File" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${data.fileName}</a>
+                    <a href="${data.url}" target="_blank" title="Unduh File" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${data.name}</a>
                 </div>
                 <div class="file-actions">
                     <small style="color:var(--text-muted);">(${fileSize})</small>
-                    <button class="btn-preview" onclick="openPreview('${fileURL}', '${data.fileName}', '${data.fileType}')">Tampilkan</button>
-                    <button class="btn-delete-cross" onclick="deleteFile(${data.id}, this.parentElement.parentElement)" title="Hapus File">✕</button>
+                    <button class="btn-preview" onclick="openPreview('${data.url}', '${data.name}', '${data.type}')">Tampilkan</button>
+                    <button class="btn-delete-cross" onclick="deleteFile('${data.name}', this.parentElement.parentElement)" title="Hapus File">✕</button>
                 </div>
             `;
             listContainer.appendChild(li);
@@ -563,13 +611,12 @@
             const container = document.getElementById('slideshowContainerImages');
             container.innerHTML = '';
             if (imageDocs.length === 0) {
-                container.innerHTML = `<div style="color: var(--text-muted); font-size: 0.95rem; font-weight: 600;">Belum ada foto/gambar yang diunggah.</div>`;
+                container.innerHTML = `<div style="color: var(--text-muted); font-size: 0.95rem; font-weight: 600;">Belum ada foto/gambar di Cloud.</div>`;
                 return;
             }
             imageDocs.forEach((doc, index) => {
-                const fileURL = URL.createObjectURL(doc.fileContent);
                 const img = document.createElement('img');
-                img.src = fileURL;
+                img.src = doc.url;
                 img.className = 'slide-img' + (index === 0 ? ' active' : '');
                 container.appendChild(img);
             });
@@ -585,12 +632,18 @@
             }
         }
 
-        function deleteFile(id, listElement) {
-            if(!confirm("Anda yakin ingin menghapus dokumen ini?")) return;
-            const transaction = db.transaction(["docs"], "readwrite");
-            const store = transaction.objectStore("docs");
-            const request = store.delete(id);
-            request.onsuccess = function() { listElement.remove(); };
+        async function deleteFile(fileName, listElement) {
+            if(!confirm("Anda yakin ingin menghapus dokumen ini dari Cloud?")) return;
+
+            const desertRef = window.fbRef(window.fbStorage, `${currentMenuId}/${fileName}`);
+
+            try {
+                await window.fbDeleteObject(desertRef);
+                listElement.remove();
+            } catch (error) {
+                console.error("Gagal menghapus file:", error);
+                alert("Gagal menghapus file dari server.");
+            }
         }
 
         function openPreview(url, name, type) {
@@ -611,7 +664,7 @@
                             const htmlTable = XLSX.utils.sheet_to_html(workbook.Sheets[workbook.SheetNames[0]], { id: 'excel-table' });
                             modalBody.innerHTML = `<div class="excel-table-container"><h4 style="margin-bottom:15px; color:var(--primary);">Lembar: ${workbook.SheetNames[0]}</h4>${htmlTable}</div>`;
                         }).catch(err => {
-                            modalBody.innerHTML = `<div style="padding:40px; text-align:center; color:red;">Gagal memuat Excel.</div>`;
+                            modalBody.innerHTML = `<div style="padding:40px; text-align:center; color:red;">Gagal memuat Excel / Masalah CORS. Silakan unduh file.</div>`;
                         });
                 } else if (type.includes('image/') || name.match(/\.(jpg|jpeg|png|gif)$/i)) {
                     modalBody.innerHTML = `<div style="display:flex; justify-content:center; align-items:center; width:100%; height:100%; padding:20px;"><img src="${url}" style="max-width:100%; max-height:100%; object-fit:contain; border-radius:8px;"></div>`;
