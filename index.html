@@ -6,6 +6,8 @@
     <title>UPTD Puskesmas Lanjut - Integrasi Layanan Primer</title>
     <!-- Library SheetJS untuk membaca Excel -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- Library Supabase JS Client dari CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         :root {
             --primary: #047857;
@@ -336,7 +338,7 @@
                     <div class="slideshow-container" id="slideshowContainerImages"></div>
                 </div>
 
-                <!-- Area Pilih Berkas -->
+                <!-- Area Pilih Berkas (Disembunyikan pada menu Jadwal) -->
                 <div class="upload-area" id="uploadAreaContainer" onclick="triggerUpload()">
                     <button class="btn-upload" type="button">Pilih Berkas</button>
                     <input type="file" id="dynamicFileInput" class="file-input-hidden" multiple onchange="handleFiles(this)">
@@ -372,31 +374,14 @@
         </div>
     </div>
 
-    <!-- Firebase SDK (Modular CDN) -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import { getStorage, ref, uploadBytes, listAll, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-storage.js";
+    <!-- Inisialisasi Supabase Client -->
+    <script>
+        // Ganti URL dan Anon Key dengan kredensial dari project Supabase Anda
+        const SUPABASE_URL = 'https://YOUR_SUPABASE_PROJECT_ID.supabase.co';
+        const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+        const BUCKET_NAME = 'puskesmas-bucket'; // Pastikan nama bucket storage Anda sesuai di Supabase
 
-        // Konfigurasi Firebase Anda (Ganti dengan kredensial dari Firebase Console)
-        const firebaseConfig = {
-            apiKey: "API_KEY_ANDA",
-            authDomain: "project-id.firebaseapp.com",
-            projectId: "project-id",
-            storageBucket: "project-id.appspot.com",
-            messagingSenderId: "sender-id",
-            appId: "app-id"
-        };
-
-        const app = initializeApp(firebaseConfig);
-        const storage = getStorage(app);
-
-        // Ubah variabel global agar bisa diakses fungsi luar
-        window.fbStorage = storage;
-        window.fbRef = ref;
-        window.fbUploadBytes = uploadBytes;
-        window.fbListAll = listAll;
-        window.fbGetDownloadURL = getDownloadURL;
-        window.fbDeleteObject = deleteObject;
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     </script>
 
     <script>
@@ -512,77 +497,93 @@
 
         function triggerUpload() { document.getElementById('dynamicFileInput').click(); }
 
-        // FUNGSI UPLOAD KE FIREBASE STORAGE
+        // FUNGSI UPLOAD BERKAS KE SUPABASE STORAGE
         async function handleFiles(input) {
             const files = input.files;
             if (files.length === 0 || currentMenuId === "") return;
-            if (!window.fbStorage) { alert("Firebase belum terhubung sepenuhnya."); return; }
 
             let categoryCode = currentMenuId.split("-")[0];
-
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                const storageRef = window.fbRef(window.fbStorage, `${currentMenuId}/${file.name}`);
+                const filePath = `${currentMenuId}/${Date.now()}_${file.name}`;
 
                 try {
-                    // Unggah file ke Firebase Storage
-                    await window.fbUploadBytes(storageRef, file);
-                    // Ambil URL publik file tersebut
-                    const downloadURL = await window.fbGetDownloadURL(storageRef);
+                    const { data, error } = await supabaseClient.storage
+                        .from(BUCKET_NAME)
+                        .upload(filePath, file);
 
-                    const fileData = {
-                        name: file.name,
-                        url: downloadURL,
-                        size: file.size,
-                        type: file.type
-                    };
+                    if (error) throw error;
 
                     if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
                         loadFilesForCurrentMenu(categoryCode);
                     } else {
+                        // Ambil public URL untuk file yang baru di-upload
+                        const { data: urlData } = supabaseClient.storage
+                            .from(BUCKET_NAME)
+                            .getPublicUrl(filePath);
+
+                        const fileData = {
+                            name: file.name,
+                            path: filePath,
+                            url: urlData.publicUrl,
+                            size: file.size,
+                            type: file.type
+                        };
                         renderFileItem(fileData);
                     }
                 } catch (error) {
-                    console.error("Gagal mengunggah file:", error);
-                    alert("Terjadi kesalahan saat mengunggah file ke Cloud.");
+                    console.error("Gagal mengunggah ke Supabase:", error);
+                    alert("Gagal mengunggah berkas: " + error.message);
                 }
             }
             input.value = '';
         }
 
-        // FUNGSI LOAD FILE DARI FIREBASE STORAGE
+        // FUNGSI MEMUAT BERKAS DARI SUPABASE STORAGE
         async function loadFilesForCurrentMenu(categoryCode) {
-            if (!window.fbStorage) {
-                setTimeout(() => loadFilesForCurrentMenu(categoryCode), 200);
-                return;
-            }
-
-            const listRef = window.fbRef(window.fbStorage, `${currentMenuId}/`);
-
             try {
-                const res = await window.fbListAll(listRef);
+                const { data, error } = await supabaseClient.storage
+                    .from(BUCKET_NAME)
+                    .list(currentMenuId + '/', {
+                        limit: 100,
+                        offset: 0,
+                        sortBy: { column: 'name', order: 'asc' }
+                    });
+
+                if (error) throw error;
+
                 let imageDocs = [];
+                if (data) {
+                    data.forEach(item => {
+                        // Abaikan folder placeholder jika ada
+                        if (item.name === '.emptyFolderPlaceholder') return;
 
-                for (const itemRef of res.items) {
-                    const url = await window.fbGetDownloadURL(itemRef);
-                    const fileData = {
-                        name: itemRef.name,
-                        url: url,
-                        type: itemRef.name.match(/\.(jpg|jpeg|png|gif)$/i) ? 'image/' : 'document'
-                    };
+                        const filePath = `${currentMenuId}/${item.name}`;
+                        const { data: urlData } = supabaseClient.storage
+                            .from(BUCKET_NAME)
+                            .getPublicUrl(filePath);
 
-                    if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
-                        imageDocs.push(fileData);
-                    } else {
-                        renderFileItem(fileData);
-                    }
+                        const fileData = {
+                            name: item.name.replace(/^\d+_/, ""), // Bersihkan timestamp di depan nama file jika ingin rapi
+                            path: filePath,
+                            url: urlData.publicUrl,
+                            type: item.metadata?.mimetype || (item.name.match(/\.(jpg|jpeg|png|gif)$/i) ? 'image/' : 'document'),
+                            size: item.metadata?.size
+                        };
+
+                        if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
+                            imageDocs.push(fileData);
+                        } else {
+                            renderFileItem(fileData);
+                        }
+                    });
                 }
 
                 if (categoryCode === 'dokrapat' || categoryCode === 'gallery') {
                     renderSlideshowImages(imageDocs);
                 }
             } catch (error) {
-                console.error("Gagal memuat file dari Firebase:", error);
+                console.error("Gagal memuat berkas dari Supabase:", error);
             }
         }
 
@@ -601,7 +602,7 @@
                 <div class="file-actions">
                     <small style="color:var(--text-muted);">(${fileSize})</small>
                     <button class="btn-preview" onclick="openPreview('${data.url}', '${data.name}', '${data.type}')">Tampilkan</button>
-                    <button class="btn-delete-cross" onclick="deleteFile('${data.name}', this.parentElement.parentElement)" title="Hapus File">✕</button>
+                    <button class="btn-delete-cross" onclick="deleteFile('${data.path}', this.parentElement.parentElement)" title="Hapus File">✕</button>
                 </div>
             `;
             listContainer.appendChild(li);
@@ -632,17 +633,19 @@
             }
         }
 
-        async function deleteFile(fileName, listElement) {
+        async function deleteFile(filePath, listElement) {
             if(!confirm("Anda yakin ingin menghapus dokumen ini dari Cloud?")) return;
 
-            const desertRef = window.fbRef(window.fbStorage, `${currentMenuId}/${fileName}`);
-
             try {
-                await window.fbDeleteObject(desertRef);
+                const { error } = await supabaseClient.storage
+                    .from(BUCKET_NAME)
+                    .remove([filePath]);
+
+                if (error) throw error;
                 listElement.remove();
             } catch (error) {
                 console.error("Gagal menghapus file:", error);
-                alert("Gagal menghapus file dari server.");
+                alert("Gagal menghapus berkas: " + error.message);
             }
         }
 
@@ -664,7 +667,7 @@
                             const htmlTable = XLSX.utils.sheet_to_html(workbook.Sheets[workbook.SheetNames[0]], { id: 'excel-table' });
                             modalBody.innerHTML = `<div class="excel-table-container"><h4 style="margin-bottom:15px; color:var(--primary);">Lembar: ${workbook.SheetNames[0]}</h4>${htmlTable}</div>`;
                         }).catch(err => {
-                            modalBody.innerHTML = `<div style="padding:40px; text-align:center; color:red;">Gagal memuat Excel / Masalah CORS. Silakan unduh file.</div>`;
+                            modalBody.innerHTML = `<div style="padding:40px; text-align:center; color:red;">Gagal memuat Excel / Masalah CORS. Silakan unduh file melalui tautan yang tersedia.</div>`;
                         });
                 } else if (type.includes('image/') || name.match(/\.(jpg|jpeg|png|gif)$/i)) {
                     modalBody.innerHTML = `<div style="display:flex; justify-content:center; align-items:center; width:100%; height:100%; padding:20px;"><img src="${url}" style="max-width:100%; max-height:100%; object-fit:contain; border-radius:8px;"></div>`;
@@ -681,7 +684,7 @@
         }
 
         function closeModal() {
-            document.getElementById('previewModal').style.display = 'none';
+            document.getElementById('previewModalstyle.display').style.display = 'none';
             document.getElementById('modalBody').innerHTML = ''; 
         }
     </script>
